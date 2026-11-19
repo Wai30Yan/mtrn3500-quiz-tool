@@ -314,6 +314,37 @@ void DecodeIntoLayout(const Layout& L, const vector<unsigned char>& bytes, int s
     }
 }
 
+// Overlay check: will a struct laid out with 'structPack' read correct values from data
+// whose members were really placed with 'dataPack' (1 = no gaps, like the GNSS stream)?
+void CheckStructMatchesData(const vector<Member>& members, int structPack, int dataPack, int dataSize)
+{
+    Layout S = ComputeLayout(members, structPack);     // where the struct looks for each member
+    Layout D = ComputeLayout(members, dataPack);       // where the sender really put each member
+    if (dataSize <= 0) dataSize = D.totalSize;
+
+    cout << left << setw(16) << "member" << setw(20) << "offset in struct" << setw(18) << "offset in data" << "result\n";
+    int firstBad = -1;
+    for (size_t i = 0; i < S.name.size(); i++)
+    {
+        bool ok = (S.offset[i] == D.offset[i]);
+        if (!ok && firstBad < 0) firstBad = (int)i;
+        cout << left << setw(16) << S.name[i] << setw(20) << S.offset[i] << setw(18) << D.offset[i]
+            << (ok ? "OK" : "WRONG (shifted by " + to_string(S.offset[i] - D.offset[i]) + ")") << "\n";
+    }
+    cout << "size of struct = " << S.totalSize << " bytes, size of data = " << dataSize << " bytes\n\n";
+
+    if (firstBad >= 0)
+        cout << "NO - the values will be wrong. '" << S.name[firstBad] << "' is at offset " << S.offset[firstBad]
+        << " in the struct but at offset " << D.offset[firstBad] << " in the data: the compiler put "
+        << S.offset[firstBad] - D.offset[firstBad] << " byte(s) of padding in front of it, and every member after it is shifted too.\n"
+        << "Fix: wrap the struct in #pragma pack(push, 1) ... #pragma pack(pop).\n";
+    else if (S.totalSize != dataSize)
+        cout << "Every member is at the right offset, so the member values are correct, BUT the struct is "
+        << S.totalSize << " bytes and the data is " << dataSize << " bytes (tail padding).\n";
+    else
+        cout << "YES - every member is at the same offset as in the data and the sizes match.\n";
+}
+
 // =====================================================================
 // C. LIDAR  (index <-> angle, range -> x,y, hex tokens)
 // =====================================================================
@@ -611,7 +642,9 @@ void MenuBytesToValues()
     cout << "\n";
     ShowBytesAs(bytes, true);
     cout << "\nUse the LITTLE-endian reading unless the question says big-endian / network byte order.\n";
-    if (bytes.size() < 4) cout << "(give at least 4 bytes to see int / float, 8 for double)\n";
+    if (bytes.size() < 4) cout << "(give at least 4 bytes to see int / float, and 8 bytes to see double)\n";
+    else if (bytes.size() < 8) cout << "(no double shown: a double needs 8 bytes and you gave " << bytes.size() << ")\n";
+    else if (bytes.size() > 8) cout << "(only the first 4 / 8 bytes are read here. For several values in one packet use option 9)\n";
 }
 
 void MenuAscii()
@@ -753,6 +786,37 @@ void MenuPacket()
         cout << "WARNING: the types need " << L.totalSize << " bytes but you gave " << bytes.size() << ".\n";
     DecodeIntoLayout(L, bytes, 0, big, decimals);
     cout << "\n(Type the answer with the same number of decimal places the question or key uses.)\n";
+}
+
+void MenuOverlayCheck()
+{
+    cout << "\n-- will this struct read the data correctly? --\n";
+    vector<Member> members;
+    int dataSize = 0;
+    if (AskYesNo("Load the GNSS sample-quiz struct (Header, Discards1[40], Northing, Easting, Height, Discards2[40], Checksum; 112 bytes)?"))
+    {
+        members.push_back(Member("Header", "int", 1, true));
+        members.push_back(Member("Discards1", "char", 40, true));
+        members.push_back(Member("Northing", "double"));
+        members.push_back(Member("Easting", "double"));
+        members.push_back(Member("Height", "double"));
+        members.push_back(Member("Discards2", "char", 40, true));
+        members.push_back(Member("Checksum", "int", 1, true));
+        dataSize = 112;
+    }
+    else
+    {
+        members = AskMembers();
+        dataSize = AskInt("Size of the data in bytes (0 = work it out)", true, 0);
+    }
+
+    int structPack = AskInt("Packing of the STRUCT: N in #pragma pack(push, N)  (question says '8 byte boundary' -> 8)", true, 8);
+    while (structPack < 1) structPack = AskInt("N must be 1 or more", true, 8);
+    int dataPack = AskInt("Packing of the DATA (1 = bytes follow each other with no gaps)", true, 1);
+    while (dataPack < 1) dataPack = AskInt("Must be 1 or more", true, 1);
+
+    cout << "\n";
+    CheckStructMatchesData(members, structPack, dataPack, dataSize);
 }
 
 void MenuLidar()
@@ -907,14 +971,15 @@ int main()
             << " 7  command message length\n"
             << " 8  find a header in received bytes\n"
             << " 9  packet of several values  (e.g. two doubles then two floats)\n"
-            << "10  run all the built-in examples\n"
+            << "10  will this struct read the data correctly?  (e.g. the GNSS question)\n"
+            << "11  run all the built-in examples\n"
             << " 0  quit\n";
         try
         {
             string choice = AskLine("Choose: ");
 
             if (choice == "0" || choice == "q" || choice == "Q") break;
-            if (choice.size() == 1 && choice[0] >= '1' && choice[0] <= '9')
+            if ((choice.size() == 1 && choice[0] >= '1' && choice[0] <= '9') || choice == "10")
                 cout << "(type b at any prompt to go back to this menu)\n";
 
             if (choice == "1") MenuNumberToBytes();
@@ -926,7 +991,8 @@ int main()
             else if (choice == "7") MenuCommand();
             else if (choice == "8") MenuHeader();
             else if (choice == "9") MenuPacket();
-            else if (choice == "10") RunExamples();
+            else if (choice == "10") MenuOverlayCheck();
+            else if (choice == "11") RunExamples();
             else cout << "Please choose a number from the menu.\n";
         }
         catch (const BackToMenu&)
